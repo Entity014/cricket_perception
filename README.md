@@ -8,13 +8,24 @@
 ระบบนี้วิเคราะห์ **Soundscape ของฟาร์มจิ้งหรีด** (เสียงหลายตัวซ้อนทับกัน) โดยไม่ต้องแยกเสียงรายตัว  
 ใช้ pipeline: **Raw Audio → Feature Extraction → UMAP → HDBSCAN → Behavior Alert**
 
-```
-Raw Audio (.wav)
-    │
-    ├─ [1] audio_utils   load / segment (5s) / denoise
-    ├─ [2] features      MFCC + Spectral + RMS + ACI  →  53-dim vector
-    ├─ [3] clustering    UMAP (GPU) + HDBSCAN  →  cluster labels
-    └─ [4] behavior      Dolbear's Law + hunger/mortality alerts
+```mermaid
+graph TD
+    A([🎙️ Raw Audio .wav]) --> B[1️⃣ audio_utils\nLoad · Segment 5s · Denoise]
+    B --> C[2️⃣ features\nMFCC · Spectral · Chroma\nRMS · ACI → 53-dim vector]
+    C --> D[3️⃣ clustering\nUMAP — GPU cuML\nHDBSCAN — auto K]
+    D --> E[4️⃣ behavior\nDolbear Law · Hunger Alert\nMortality Alert]
+    E --> F1([⚠️ แจ้งเตือน\nควรให้อาหาร])
+    E --> F2([🚨 แจ้งเตือน\nอัตราตายสูง])
+    E --> F3([✅ ปกติ])
+
+    style A fill:#1e1e3f,stroke:#7c85ff,color:#fff
+    style B fill:#1a2a1a,stroke:#4caf50,color:#fff
+    style C fill:#1a2a1a,stroke:#4caf50,color:#fff
+    style D fill:#2a1a2a,stroke:#ce93d8,color:#fff
+    style E fill:#2a1a1a,stroke:#ff8a65,color:#fff
+    style F1 fill:#3a2a00,stroke:#ffc107,color:#fff
+    style F2 fill:#3a0000,stroke:#f44336,color:#fff
+    style F3 fill:#003a00,stroke:#66bb6a,color:#fff
 ```
 
 ## โครงสร้างโปรเจกต์
