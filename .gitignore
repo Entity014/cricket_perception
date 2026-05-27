@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Dataset (too large for git)
+dataset/
+*.wav
+*.mp3
+*.flac
+*.ogg
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Models & checkpoints
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.h5
+
+# Feature cache
+*.npy
+*.npz
+features_cache/
+
+# IDE
+**/.vscode/
+**/Xero-skills/
+**/.agents/
+**/.codegraph/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
