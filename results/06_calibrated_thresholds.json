@@ -1,0 +1,10 @@
+{
+  "rms_baseline": 0.01343555931244689,
+  "aci_baseline": 535.1535011884023,
+  "reference_temp_c": 28.0,
+  "aggressive_threshold": 0.296,
+  "rms_low_threshold": 0.711,
+  "aci_low_threshold": 0.882,
+  "calibration_source": "controlled_experiment_3day",
+  "note": "Replace with real farm recordings"
+}
