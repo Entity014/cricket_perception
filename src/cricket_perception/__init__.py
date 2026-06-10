@@ -10,6 +10,7 @@ Pipeline:
 __version__ = "0.1.0"
 __author__ = "Xero"
 
-from cricket_perception import audio_utils, features, clustering, behavior
+from cricket_perception import audio_utils, features, clustering, behavior, augmentation
+from cricket_perception.augmentation import SoundscapeSynthesizer
 
-__all__ = ["audio_utils", "features", "clustering", "behavior"]
+__all__ = ["audio_utils", "features", "clustering", "behavior", "augmentation", "SoundscapeSynthesizer"]

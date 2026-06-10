@@ -139,6 +139,38 @@ pytest tests/ -v
 | **อัตราตาย**    | RMS + ACI เทียบกับ baseline      | < 40%/50% ของค่าปกติ     |
 | **Temperature** | Dolbear's Law Q10 correction     | ปรับอัตโนมัติตามอุณหภูมิ |
 
+## Domain Gap & Augmentation
+
+ระบบนี้มาพร้อมกับฟีเจอร์การทำ **Mixture Augmentation** เพื่อแก้ปัญหาความแตกต่างระหว่างข้อมูลชุดฝึกสอน (เสียงเดี่ยว/สะอาด) และเสียงจริงในฟาร์ม (เสียงจิ้งหรีดร้องซับซ้อนทับซ้อนกัน):
+
+- **SoundscapeSynthesizer**: สุ่มผสมสัญญาณเสียงจิ้งหรีดหลายๆ ตัวพร้อมปรับระดับความดัง (Gain) และการเหลื่อมของเวลา (Jitter) เพื่อจำลองความหนาแน่นและระยะห่างของจิ้งหรีด
+- **Noise Injection**: เพิ่มเสียงรบกวนสังเคราะห์ (Pink noise, White noise, Brown noise) ที่ระดับ SNR ต่างๆ เพื่อจำลองเสียงสภาพแวดล้อมที่แท้จริง
+- **Composition-based Labeling**: วิเคราะห์พลังงานเสียงผสมเพื่อระบุคลาสเสียง (เช่น หากสัดส่วนเสียง Aggressive Song ในกลุ่มเสียงหลักมีพลังงานรวมเกิน 30% จะกำหนดเป็นคลาส "Aggressive Song" เพื่อใช้กระตุ้นสัญญาณเตือนภัย)
+
+ตัวอย่างการฝึกฝนโมเดลร่วมกับฟีเจอร์สังเคราะห์ข้อมูล:
+
+```python
+from cricket_perception.classifier import SongTypeClassifier
+from cricket_perception.features import FeatureExtractor
+
+# เตรียม FeatureExtractor
+extractor = FeatureExtractor(sr=22050)
+
+# เทรนโมเดลร่วมกับเทคนิค Augmentation
+clf = SongTypeClassifier(backend="svm")
+metrics = clf.train_with_augmentation(
+    X_original=X_train,
+    y_original=y_train,
+    segments_csv="results/segments_with_clusters.csv",
+    labels_csv="results/04_cluster_labels.csv",
+    dataset_dir="dataset/insectset32/Orthoptera/Orthoptera",
+    extractor=extractor,
+    aug_ratio=0.5, # สร้างข้อมูลสังเคราะห์ 50% ของขนาดข้อมูลจริง
+    cv_folds=5,
+)
+print("Augmented Training Complete:", metrics)
+```
+
 ## GPU Acceleration
 
 ระบบ detect GPU อัตโนมัติ:
@@ -151,9 +183,54 @@ pytest tests/ -v
 pip install --extra-index-url=https://pypi.nvidia.com cuml-cu12==24.10.*
 ```
 
-## Research Notes
+## Streaming Long Recordings
 
-ดูรายละเอียดหลักการทางวิทยาศาสตร์ใน [`research_notes.md`](research_notes.md)
+Pipeline รองรับไฟล์เสียงยาวหลายชั่วโมงโดยไม่ต้องโหลดทั้งไฟล์เข้า RAM:
+
+### Memory-efficient I/O
+
+```python
+from cricket_perception.audio_utils import stream_audio
+
+# ไฟล์ 24 ชม. ใช้ RAM ~3 MB แทน ~7.2 GB
+for window, t in stream_audio("farm_24h.wav", window_sec=2.5, hop_sec=1.0):
+    features = extractor.extract(window)
+```
+
+### Real-time Monitor + CSV Logging
+
+```python
+from cricket_perception.realtime import RealTimeMonitor
+
+monitor = RealTimeMonitor(classifier_path="results/song_classifier.pkl")
+for result in monitor.stream_file(
+    "farm_24h.wav",
+    csv_path="results/farm_2026-05-29.csv",   # บันทึกผลทุก window เป็น CSV
+    aggregate_minutes=5.0,                     # smoothing ทุก 5 นาที
+):
+    if result.alerts:
+        print(result.alerts)
+```
+
+### Temporal Smoothing
+
+```python
+from cricket_perception.realtime import RollingAggregator
+
+agg = RollingAggregator(window_minutes=5.0)
+for result in monitor.stream_file("farm.wav"):
+    agg.add(result)
+    summary = agg.summary()
+    # summary["smoothed_hungry"]         — ดูจากค่าเฉลี่ย 5 นาที (ลด false positive)
+    # summary["smoothed_mortality_risk"] — majority vote จาก 5 นาที
+    # summary["song_type_fractions"]     — สัดส่วนเสียงแต่ละประเภทใน 5 นาที
+```
+
+| Component | หน้าที่ |
+|-----------|---------|
+| `stream_audio()` | อ่านไฟล์ทีละ block (30s) + yield sliding window → RAM คงที่ |
+| `RollingAggregator` | Smooth ผลลัพธ์ข้ามเวลา N นาที → ลด false positive |
+| `ResultLogger` | เขียน CSV ทีละแถว → วิเคราะห์ time-series ย้อนหลังได้ |
 
 ## License
 

@@ -6,6 +6,7 @@ Step 1 of the Cricket Perception pipeline.
 Responsibilities:
     - Load audio files (WAV, FLAC, MP3)
     - Segment into fixed-length frames
+    - **Stream** long audio files chunk-by-chunk (hours-long recordings)
     - Optional denoising (spectral subtraction via noisereduce)
 
 Usage:
@@ -14,12 +15,19 @@ Usage:
     y, sr = load_audio("recording.wav")
     segments = segment_audio(y, sr, segment_sec=5.0)
     y_clean = denoise_audio(y, sr)
+
+    # Stream a long file without loading into RAM:
+    from cricket_perception.audio_utils import stream_audio
+
+    for window, start_sec in stream_audio("24h_recording.wav", window_sec=2.5):
+        process(window)
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Iterator
 
 import librosa
 import numpy as np
@@ -31,6 +39,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_SR: int = 22_050          # resample rate (Hz)
 DEFAULT_SEGMENT_SEC: float = 5.0  # segment length (seconds)
 DEFAULT_HOP_SEC: float = 2.5      # hop between segments (50% overlap)
+DEFAULT_READ_BLOCK_SEC: float = 30.0  # internal I/O read block size
 
 
 # ── Load ───────────────────────────────────────────────────────────────────────
@@ -190,3 +199,113 @@ def trim_silence(
     """Trim leading/trailing silence using librosa's energy-based trimming."""
     y_trimmed, _ = librosa.effects.trim(y, top_db=top_db)
     return y_trimmed
+
+
+# ── Streaming (memory-efficient long-file support) ─────────────────────────────
+
+def get_file_duration(path: str | Path) -> float:
+    """Get the duration of an audio file in seconds without loading it.
+
+    Args:
+        path: Path to audio file.
+
+    Returns:
+        Duration in seconds.
+    """
+    info = sf.info(str(path))
+    return info.duration
+
+
+def stream_audio(
+    path: str | Path,
+    sr: int = DEFAULT_SR,
+    window_sec: float = 2.5,
+    hop_sec: float = 1.0,
+    read_block_sec: float = DEFAULT_READ_BLOCK_SEC,
+) -> Iterator[tuple[np.ndarray, float]]:
+    """Stream an audio file as overlapping windows without loading it all into RAM.
+
+    Reads the file in blocks of ``read_block_sec`` seconds using
+    ``soundfile.SoundFile``, resamples on-the-fly if needed, and yields
+    sliding windows of ``window_sec`` seconds advancing by ``hop_sec``.
+
+    Peak memory ≈ ``(read_block_sec + window_sec) × sr × 4`` bytes,
+    regardless of total file length.  A 24-hour recording at 22 050 Hz
+    uses ~2.9 MB instead of ~7.2 GB.
+
+    Args:
+        path:            Path to audio file (.wav, .flac, .mp3, .ogg).
+        sr:              Target sample rate in Hz.
+        window_sec:      Length of each output window in seconds.
+        hop_sec:         Hop between consecutive windows in seconds.
+        read_block_sec:  Internal I/O block size in seconds (larger = fewer
+                         disk reads but more RAM; 30 s is a good default).
+
+    Yields:
+        ``(window, start_sec)`` tuples where *window* is a float32 array
+        of shape ``[int(window_sec * sr)]`` and *start_sec* is the window's
+        offset from the beginning of the file.
+
+    Example::
+
+        from cricket_perception.audio_utils import stream_audio
+
+        for window, t in stream_audio("farm_24h.wav", window_sec=2.5, hop_sec=1.0):
+            features = extractor.extract(window)
+            print(f"t={t:.1f}s  features={features.shape}")
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Audio file not found: {path}")
+
+    window_samples = int(window_sec * sr)
+    hop_samples = int(hop_sec * sr)
+
+    with sf.SoundFile(str(path)) as f:
+        orig_sr = f.samplerate
+        read_block_frames = int(read_block_sec * orig_sr)
+
+        buffer = np.empty(0, dtype=np.float32)
+        position_s = 0.0       # current window start time (in seconds)
+        windows_yielded = 0
+        total_frames = f.frames
+
+        logger.info(
+            "Streaming '%s' | orig_sr=%d target_sr=%d | "
+            "duration=%.1fs | window=%.1fs hop=%.1fs | block=%.0fs",
+            path.name, orig_sr, sr,
+            total_frames / orig_sr, window_sec, hop_sec, read_block_sec,
+        )
+
+        while True:
+            # ── Read a block from disk ──────────────────────────────────
+            block = f.read(read_block_frames, dtype="float32")
+            eof = len(block) == 0
+
+            if not eof:
+                # Stereo → mono
+                if block.ndim > 1:
+                    block = block.mean(axis=1)
+
+                # Resample if needed
+                if orig_sr != sr:
+                    block = librosa.resample(
+                        block, orig_sr=orig_sr, target_sr=sr,
+                    ).astype(np.float32)
+
+                buffer = np.concatenate([buffer, block])
+
+            # ── Yield windows from buffer ───────────────────────────────
+            while len(buffer) >= window_samples:
+                yield buffer[:window_samples].copy(), position_s
+                buffer = buffer[hop_samples:]
+                position_s += hop_sec
+                windows_yielded += 1
+
+            if eof:
+                break
+
+    logger.info(
+        "Stream complete: %d windows over %.1fs audio from '%s'",
+        windows_yielded, total_frames / orig_sr, path.name,
+    )

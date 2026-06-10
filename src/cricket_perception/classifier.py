@@ -171,6 +171,66 @@ class SongTypeClassifier:
         )
         return result
 
+    def train_with_augmentation(
+        self,
+        X_original: np.ndarray,
+        y_original: list[str] | np.ndarray,
+        segments_csv: str | Path,
+        labels_csv: str | Path,
+        dataset_dir: str | Path,
+        extractor: object,  # FeatureExtractor instance
+        n_augmented: int = 500,
+        aug_ratio: float | None = 0.5,
+        cv_folds: int = 5,
+        synthesizer: object | None = None,
+    ) -> dict:
+        """เทรนโมเดลโดยใช้ทั้ง original data และ augmented synthetic soundscapes.
+
+        Args:
+            X_original:   Feature matrix [N, D] (raw, unscaled) ของเดิม.
+            y_original:   Song-type labels [N] ของเดิม.
+            segments_csv: Path ไปยัง CSV บันทึกรายละเอียดเซกเมนต์ (segments_with_clusters.csv).
+            labels_csv:   Path ไปยัง CSV แมปปิ้งคลัสเตอร์ (04_cluster_labels.csv).
+            dataset_dir:  Path ไปยังไดเรกทอรี dataset.
+            extractor:    อ็อบเจกต์ FeatureExtractor สำหรับใช้สกัดฟีเจอร์จากคลื่นเสียงสังเคราะห์.
+            n_augmented:  จำนวนเสียงสังเคราะห์ที่ต้องการสร้าง (กรณีไม่ใช้ aug_ratio).
+            aug_ratio:    สัดส่วนของเสียงสังเคราะห์เทียบกับข้อมูลจริง (เช่น 0.5 = สร้าง 50% ของของเดิม).
+            cv_folds:     จำนวนรอบ cross-validation.
+            synthesizer:  อ็อบเจกต์ SoundscapeSynthesizer ที่กำหนดค่าไว้แล้ว (เลือกได้).
+
+        Returns:
+            Dict ผลลัพธ์จากการฝึกฝนโมเดล.
+        """
+        from cricket_perception.augmentation import SoundscapeSynthesizer
+
+        y_original = list(y_original)
+
+        if aug_ratio is not None:
+            n_augmented = int(len(X_original) * aug_ratio)
+
+        if n_augmented > 0:
+            if synthesizer is None:
+                synthesizer = SoundscapeSynthesizer(sr=extractor.sr, segment_sec=5.0)
+
+            logger.info("Generating %d synthetic augmented soundscapes...", n_augmented)
+            synth_waveforms, synth_labels = synthesizer.generate_dataset(
+                segments_csv=Path(segments_csv),
+                labels_csv=Path(labels_csv),
+                dataset_dir=Path(dataset_dir),
+                n_samples=n_augmented,
+            )
+
+            logger.info("Extracting features from augmented soundscapes...")
+            X_synth = extractor.extract_batch(synth_waveforms, show_progress=True)
+
+            X_combined = np.vstack([X_original, X_synth])
+            y_combined = y_original + list(synth_labels)
+        else:
+            X_combined = X_original
+            y_combined = y_original
+
+        return self.train(X_combined, y_combined, cv_folds=cv_folds)
+
     # ── Inference ─────────────────────────────────────────────────────────────
 
     def predict(self, x: np.ndarray) -> str:
