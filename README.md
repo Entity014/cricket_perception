@@ -1,12 +1,45 @@
 # 🦗 Cricket Acoustic Perception
 
-> **วิทยานิพนธ์ปริญญาโท** — การวิเคราะห์และจัดกลุ่มเสียงจิ้งหรีดในฟาร์มเชิงพาณิชย์  
-> โดยใช้ Unsupervised Learning เพื่อตรวจวัดพฤติกรรม (ความหิว, อัตราการรอดชีวิต)
+> **วิทยานิพนธ์ปริญญาโท** — การวิเคราะห์เสียงจิ้งหรีดในฟาร์มเชิงพาณิชย์เพื่อจำแนก **ระยะการเจริญเติบโต (Growth Stage)**  
+> โดยใช้ Supervised Learning จาก label ของผู้เชี่ยวชาญ ควบคู่กับการตรวจวัดพฤติกรรม (ความหิว, อัตราการรอดชีวิต)
+
+## 🔄 สถานะโครงการ (Project Direction)
+
+โครงการกำลังปรับทิศทางจาก **Unsupervised Behavior Clustering** (Phase เดิม) ไปสู่ **Supervised Growth-Stage Classification** (Phase ใหม่) เนื่องจากตอนนี้มีผู้เชี่ยวชาญ (expert) ที่สามารถระบุระยะการเจริญเติบโตของจิ้งหรีดได้จริง ทำให้ไม่ต้องพึ่งการ label จาก unsupervised cluster อีกต่อไป
+
+**Growth Stage classes (ร่างเบื้องต้น — รอยืนยันชื่อ/นิยามจากผู้เชี่ยวชาญ):**
+
+| # | Stage (ร่าง) | ลักษณะ |
+| - | ------------ | ------ |
+| 1 | ตัวอ่อน / เด็ก (Nymph) | ไม่มีปีก ตัวเล็ก |
+| 2 | วัยรุ่น / หนุ่ม (Sub-adult) | ปีกเริ่มงอก (wing pad) |
+| 3 | เพิ่งลอกคราบเป็นตัวเต็มวัย (Young adult) | ปีกสมบูรณ์แต่ยังนิ่ม |
+| 4 | ตัวเต็มวัยพร้อมผสมพันธุ์ (Mature adult) | ปีกแข็งเต็มที่ พร้อมเก็บเกี่ยว/ผสมพันธุ์ |
+
+**สถานะข้อมูล:** ยังไม่มี dataset ที่ label ไว้ — อยู่ระหว่างวางแผนเก็บข้อมูลใหม่ โดยใช้ฟีเจอร์ `Label` ที่มีอยู่แล้วในระบบ firmware ([Web UI](#web-ui)) เพื่อบันทึกเสียงแยกตามระยะที่ผู้เชี่ยวชาญยืนยันต่อ session
+
+**ข้อมูลฟาร์มที่ยืนยันแล้ว:**
+- ฟาร์มเลี้ยง**จิ้งหรีดสายพันธุ์เดียว** (ยังไม่ทราบว่าเป็นสายพันธุ์อะไร)
+- โครงสร้างการเลี้ยงเป็น **1 บ่อ = 1 stage** (แต่ละบ่อมีจิ้งหรีดระยะเดียวกันทั้งหมด ไม่ปนกันหลาย stage ในบ่อเดียว) — ทำให้การ label เสียงต่อ session ทำได้ตรงไปตรงมา เพียงตั้งค่า `Label` ให้ตรงกับ stage ของบ่อที่ไปอัดเสียง ไม่ต้องกังวลเรื่องเสียงหลาย stage ปนกันในไฟล์เดียว
+- มี **4 stage** จริง (ยืนยันจำนวนแล้ว แต่ยังไม่รู้ชื่อ/นิยามของแต่ละ stage) และ**ไม่นับไข่ (Egg) เป็นหนึ่งใน stage** — เริ่มนับจากฟักเป็นตัวอ่อน ดูรายละเอียดคำถามที่ยังค้างอยู่ที่ [docs/farm_visit_questions.md](docs/farm_visit_questions.md)
+
+**แผนขั้นตอน (Growth-Stage Pipeline):**
+
+1. **เก็บข้อมูลเสียง** แยกตาม session พร้อม label ระยะจากผู้เชี่ยวชาญ (ผ่าน firmware `Label` field) — คาดว่าจะได้ label ไม่ครบทุก segment ในช่วงแรก
+2. **Unsupervised clustering (UMAP + HDBSCAN)** เป็น exploratory/validation step — รันบนข้อมูลทั้งหมด (labeled + unlabeled) เพื่อดูว่าเสียงแบ่งกลุ่มตาม acoustic signature ได้กี่กลุ่ม แล้วเทียบกับ label ที่มีจากผู้เชี่ยวชาญว่า cluster ↔ stage สอดคล้องกันแค่ไหน (ไม่ใช้ cluster แทน ground-truth label โดยตรง เพราะ cluster อาจแยกตาม noise/environment มากกว่า stage จริง โดยเฉพาะ stage 1-2 ที่แทบไม่มีเสียง chirp)
+3. **Semi-supervised label propagation** — ถ้า cluster จับคู่กับ label ได้ดี ใช้ cluster ช่วย propagate label ไปยัง segment ที่ยังไม่มี label จากผู้เชี่ยวชาญ เพื่อประหยัดเวลา labeling
+4. **Train supervised `GrowthStageClassifier`** บนชุดข้อมูลที่ label ครบ (จาก expert + propagated) — สถาปัตยกรรมเดิมจาก `SongTypeClassifier` (SVM/RF) นำมาปรับใช้ได้
+
+**หมายเหตุ:** ระบบ `behavior.py` (hunger/mortality alert จาก Dolbear's Law + RMS/ACI baseline) ยังคงเก็บไว้แยกต่างหากตามเดิม ไม่ได้ถูกแทนที่โดย growth-stage classification — ทั้งสองระบบทำงานคู่ขนานกัน
 
 ## ภาพรวมโครงการ
 
-ระบบนี้วิเคราะห์ **Soundscape ของฟาร์มจิ้งหรีด** (เสียงหลายตัวซ้อนทับกัน) โดยไม่ต้องแยกเสียงรายตัว  
-ใช้ pipeline: **Raw Audio → Feature Extraction → UMAP → HDBSCAN → Behavior Alert**
+ระบบนี้วิเคราะห์ **Soundscape ของฟาร์มจิ้งหรีด** (เสียงหลายตัวซ้อนทับกัน) โดยไม่ต้องแยกเสียงรายตัว
+
+- **Growth-Stage Pipeline (ใหม่):** **Raw Audio → Feature Extraction → Supervised Classifier (label จากผู้เชี่ยวชาญ) → Growth Stage**
+- **Behavior Alert Pipeline (เดิม, คงไว้):** **Raw Audio → Feature Extraction → UMAP → HDBSCAN → Behavior Alert**
+
+> Diagram ด้านล่างคือ Behavior Alert Pipeline (Phase เดิม) ที่ยังคงทำงานอยู่ — diagram ของ Growth-Stage Pipeline (Phase ใหม่) จะถูกเพิ่มเข้ามาเมื่อมี dataset ที่ label แล้ว
 
 ```mermaid
 flowchart TD
@@ -122,6 +155,8 @@ pytest tests/ -v
 
 ## Feature Pipeline
 
+> Audio recorded at **22 050 Hz** (firmware) → feature extraction ที่ `sr=22050` (Python) ตรงกัน
+
 | Feature                                   | Dim    | บทบาท                               |
 | ----------------------------------------- | ------ | ----------------------------------- |
 | MFCC (13 coeff × mean+std)                | 26     | Timbre / texture ของเสียง           |
@@ -133,11 +168,68 @@ pytest tests/ -v
 
 ## Behavior Analysis
 
-| สัญญาณ          | วิธีตรวจ                         | เกณฑ์                    |
-| --------------- | -------------------------------- | ------------------------ |
-| **ความหิว**     | Aggressive Song cluster fraction | > 35% ของ soundscape     |
-| **อัตราตาย**    | RMS + ACI เทียบกับ baseline      | < 40%/50% ของค่าปกติ     |
-| **Temperature** | Dolbear's Law Q10 correction     | ปรับอัตโนมัติตามอุณหภูมิ |
+| สัญญาณ          | วิธีตรวจ                         | เกณฑ์                                              |
+| --------------- | -------------------------------- | -------------------------------------------------- |
+| **ความหิว**     | Aggressive Song cluster fraction | calibrated จาก feeding trial (default 35%)          |
+| **อัตราตาย**    | RMS + ACI เทียบกับ baseline      | calibrated จาก mortality trial (default 40%/50%)   |
+| **Temperature** | Dolbear's Law Q10 correction     | ปรับอัตโนมัติตามอุณหภูมิ                           |
+| **Circadian**   | cosine weighting ตามเวลากลางคืน  | ผ่อนปรน mortality threshold ตอนกลางวัน (0.1×–1.0×) |
+
+### Threshold Calibration จาก Feeding Trial จริง
+
+```python
+from cricket_perception.behavior import BehaviorMonitor
+
+monitor = BehaviorMonitor(
+    rms_baseline=0.05, aci_baseline=250.0,
+    aggressive_cluster_ids=[2], calling_cluster_ids=[0],
+)
+
+# trial_records = list of {"aggressive_frac": ..., "rms_ratio": ..., "aci_ratio": ...}
+# was_hungry = [True, False, True, ...]  ← บันทึกจากฟาร์มว่าช่วงไหนหิวจริง
+report = monitor.calibrate_from_trials(
+    records=trial_records,
+    hunger_labels=was_hungry,
+    mortality_labels=had_mortality,
+)
+print(report)
+# {"hunger": {"threshold": 0.28, "auc": 0.87, "sensitivity": 0.82, "specificity": 0.79}, ...}
+```
+
+Youden's J statistic จาก ROC curve ให้ threshold ที่ maximize (sensitivity + specificity − 1)
+พร้อม AUC สำหรับรายงานในวิทยานิพนธ์
+
+## Hardware
+
+| Component     | รายละเอียด                                                                 |
+| ------------- | -------------------------------------------------------------------------- |
+| MCU           | ESP32 (dual-core, FreeRTOS)                                                |
+| Microphone    | I2S MEMS mic — WS: GPIO42, SCK: GPIO41, SD: GPIO40                        |
+| Sample Rate   | **22 050 Hz** (ตรงกับ Python pipeline), 16-bit mono WAV                   |
+| Gain          | Software AGC — target RMS ≈ 2 500 (−22 dBFS), range ×1–×16, EMA α = 0.05 |
+| Sensor        | DHT22 (GPIO4) — Temperature + Humidity ทุก 10 วินาที                      |
+| Storage       | SD card (SPI, CS: GPIO10), auto-split ที่ 100 MB/ไฟล์                     |
+| Multi-node    | WiFi AP/STA — Main node เปิด AP, Secondary node join และ sync อัตโนมัติ    |
+| Power         | Built-in battery — millis() ต่อเนื่อง ไม่ reset                           |
+
+### Folder structure บน SD card
+
+```
+/node0_D1_Food_D2_Food_12345/
+    meta.txt          # Node ID, Label, Start_ms, End_ms
+    audio_0.wav       # ไฟล์เสียง (≤100 MB ต่อไฟล์)
+    data_0.csv        # Timestamp_ms, Temperature_C, Humidity_pct
+    audio_1.wav       # auto-split ถัดไป
+    data_1.csv
+```
+
+### Web UI
+
+Main node เปิด AP `Cricket-Audio` (password `12345678`) — เข้า `http://192.168.4.1`
+
+- เลือก Label (สภาวะการทดลอง) → กด **Record All** → sync ไปทุก node พร้อมกัน
+- ดู status realtime: SD, I2S, Mic Gain (AGC), Nodes online
+- Download ไฟล์โดยตรงจาก browser
 
 ## Domain Gap & Augmentation
 

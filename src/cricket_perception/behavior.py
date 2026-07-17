@@ -35,8 +35,6 @@ from typing import NamedTuple
 
 import numpy as np
 
-logger = logging.getLogger(__name__)
-
 
 # ── Dolbear's Law ─────────────────────────────────────────────────────────────
 
@@ -271,6 +269,22 @@ class BehaviorMonitor:
     rms_low_threshold: float    = 0.40
     aci_low_threshold: float    = 0.50
 
+    # Circadian correction — จิ้งหรีดเป็น nocturnal, เงียบตอนกลางวันถือว่าปกติ
+    use_circadian: bool         = True
+    nocturnal_peak_hour: float  = 22.0  # ช่วงที่ active มากที่สุด (ทุ่มสองทุ่ม)
+
+    def _circadian_weight(self, ts: datetime) -> float:
+        """Activity scaling factor based on hour of day (0.1–1.0).
+
+        Peak = 1.0 ที่ nocturnal_peak_hour, ต่ำสุด = 0.1 ช่วงกลางวัน.
+        ใช้ scale mortality threshold ลงตอนกลางวัน เพื่อไม่ false alarm
+        เพียงเพราะจิ้งหรีดนอนหลับตามธรรมชาติ
+        """
+        h = ts.hour + ts.minute / 60.0
+        phase = (h - self.nocturnal_peak_hour) % 24
+        # cosine ลงมาที่ 0.1 แทนที่จะเป็น -1 เพื่อไม่ invert threshold
+        return float(0.1 + 0.9 * max(0.0, np.cos(2 * np.pi * phase / 24)))
+
     def analyze(
         self,
         rms: float,
@@ -293,6 +307,11 @@ class BehaviorMonitor:
         """
         ts = timestamp or datetime.now()
 
+        # ช่วงกลางวันจิ้งหรีดเงียบตามธรรมชาติ → ผ่อนปรน mortality threshold
+        circadian = self._circadian_weight(ts) if self.use_circadian else 1.0
+        effective_rms_thr = self.rms_low_threshold * circadian
+        effective_aci_thr = self.aci_low_threshold * circadian
+
         hunger = hunger_alert(
             cluster_fractions=cluster_fractions,
             aggressive_cluster_ids=self.aggressive_cluster_ids,
@@ -304,11 +323,12 @@ class BehaviorMonitor:
             aci=aci,
             rms_baseline=self.rms_baseline,
             aci_baseline=self.aci_baseline,
-            rms_low_threshold=self.rms_low_threshold,
-            aci_low_threshold=self.aci_low_threshold,
+            rms_low_threshold=effective_rms_thr,
+            aci_low_threshold=effective_aci_thr,
             temperature_c=temperature_c,
             reference_temp_c=self.reference_temp_c,
         )
+        mortality["circadian_weight"] = round(circadian, 4)
 
         result = BehaviorResult(
             timestamp=ts,
@@ -321,3 +341,74 @@ class BehaviorMonitor:
             logger.warning("🚨 Critical alerts at %s: %s", ts.isoformat(), result.alerts)
 
         return result
+
+    def calibrate_from_trials(
+        self,
+        records: list[dict],
+        hunger_labels: list[bool] | None = None,
+        mortality_labels: list[bool] | None = None,
+    ) -> dict:
+        """หา optimal thresholds จาก feeding trial จริง ด้วย Youden's J (ROC).
+
+        Args:
+            records: List of dicts ที่มี keys:
+                     'aggressive_frac', 'rms_ratio', 'aci_ratio'
+                     (คำนวณก่อนโดย hunger_alert / mortality_alert)
+            hunger_labels:    True = หิวจริง (เช่น บันทึกว่าไม่ได้ให้อาหาร N ชั่วโมง)
+            mortality_labels: True = มีการตายสูงกว่าปกติ (นับจริงจากฟาร์ม)
+
+        Returns:
+            Dict รายงาน threshold ใหม่ + AUC สำหรับแต่ละ metric
+
+        Example::
+
+            monitor.calibrate_from_trials(
+                records=trial_records,
+                hunger_labels=was_hungry,
+                mortality_labels=had_mortality,
+            )
+        """
+        try:
+            from sklearn.metrics import roc_curve, roc_auc_score
+        except ImportError as e:
+            raise ImportError("calibrate_from_trials ต้องการ scikit-learn: pip install scikit-learn") from e
+
+        report: dict = {}
+
+        def _best_threshold(scores: np.ndarray, labels: list[bool], name: str) -> float:
+            y = np.array(labels, dtype=int)
+            if y.sum() == 0 or y.sum() == len(y):
+                raise ValueError(f"{name}: labels ต้องมีทั้ง True และ False อย่างน้อย 1 ค่า")
+            fpr, tpr, thresholds = roc_curve(y, scores)
+            auc = roc_auc_score(y, scores)
+            j = tpr - fpr  # Youden's J
+            best_idx = int(np.argmax(j))
+            best_thr = float(thresholds[best_idx])
+            report[name] = {
+                "threshold": round(best_thr, 4),
+                "auc": round(float(auc), 4),
+                "sensitivity": round(float(tpr[best_idx]), 4),
+                "specificity": round(float(1 - fpr[best_idx]), 4),
+            }
+            logger.info("[calibrate] %s → threshold=%.4f  AUC=%.3f", name, best_thr, auc)
+            return best_thr
+
+        if hunger_labels is not None:
+            agg_scores = np.array([r["aggressive_frac"] for r in records])
+            self.aggressive_threshold = _best_threshold(agg_scores, hunger_labels, "hunger")
+
+        if mortality_labels is not None:
+            # ถ้า rms_ratio หรือ aci_ratio ต่ำ → at_risk ดังนั้น invert score
+            rms_scores = np.array([r["rms_ratio"] for r in records])
+            aci_scores = np.array([r["aci_ratio"] for r in records])
+            # ใช้ min(rms, aci) เป็น composite mortality score (ต่ำ = risk สูง)
+            mortality_score = np.minimum(rms_scores, aci_scores)
+            # invert เพราะ roc_curve ต้องการ high score = positive class
+            thr = _best_threshold(1.0 - mortality_score, mortality_labels, "mortality")
+            # thr ของ inverted score → threshold จริงคือ 1 - thr
+            real_thr = round(1.0 - thr, 4)
+            self.rms_low_threshold = real_thr
+            self.aci_low_threshold = real_thr
+            report["mortality"]["threshold"] = real_thr
+
+        return report
